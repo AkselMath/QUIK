@@ -42,6 +42,8 @@ class MixedQLinear(torch.nn.Module):
                  in_features, out_features, shared_input=None,
                  fp_features_num=0, symm=False, bits=4, dtype=torch.float16):
         super().__init__()
+
+        self.cuda_stream = torch.cuda.Stream()
         self.fp_features_num = fp_features_num
         self.int_features_num = in_features - fp_features_num
         self.in_features = in_features
@@ -119,24 +121,30 @@ class MixedQLinear(torch.nn.Module):
             #     shared_input.meta = quik.asymmetric.find_meta(x, self.bits)
             #     shared_input.qint_x = quik.asymmetric.quantizeOld(x, shared_input.meta, self.bits)
 
+        torch.cuda.synchronize()
+
         # Compute matmul for full precision part
-        if self.fp_features_num > 0:
-            fp_result = torch.nn.functional.linear(shared_input.fp_x, self.fp_weight, self.bias)
-        elif self.bias is not None:
-            fp_result = self.bias.repeat(shared_input.qint_x.shape[0], 1)
-        else:
-            if not hasattr(self, "zeros_add"):
-                self.register_buffer("zeros_add",
-                                     torch.zeros((shared_input.qint_x.shape[0], self.int_weight.shape[0]),
-                                                 dtype=self.dtype, requires_grad=False,
-                                                 device=self.int_weight.device))
-            fp_result = self.zeros_add
+        with torch.cuda.stream(self.cuda_stream):
+            if self.fp_features_num > 0:
+                fp_result = torch.nn.functional.linear(shared_input.fp_x, self.fp_weight, self.bias)
+            elif self.bias is not None:
+                fp_result = self.bias.repeat(shared_input.qint_x.shape[0], 1)
+            else:
+                if not hasattr(self, "zeros_add"):
+                    self.register_buffer("zeros_add",
+                                        torch.zeros((shared_input.qint_x.shape[0], self.int_weight.shape[0]),
+                                                    dtype=self.dtype, requires_grad=False,
+                                                    device=self.int_weight.device))
+                fp_result = self.zeros_add
 
         # Compute matmul for int part
         if self.bits == 4:
             int_result = quik.matmul.int4Matmul(shared_input.qint_x, self.int_weight)
         else:
             int_result = quik.matmul.int8Matmul(shared_input.qint_x, self.int_weight)
+
+        torch.cuda.synchronize()
+        
         # Dequantize result and add to full precision part
         if self.symmetric:
             output = quik.symmetric.dequantize(int_result, shared_input.qscale_x, self.weights_scales, fp_result)
