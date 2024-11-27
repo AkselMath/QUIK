@@ -76,7 +76,3 @@ if __name__ == '__main__':
     )
     args = parser.parse_args()
     benchmark(args)
-
-
-# np.save(f'times_{type_test}.npy', np.array(timses))
-# timses[-1][-1][-1].append(round(np.mean(times), 3))
