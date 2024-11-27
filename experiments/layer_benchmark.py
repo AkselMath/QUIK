@@ -5,6 +5,7 @@ import argparse
 import numpy as np
 import random
 
+
 fp_features_nums = [256, 512, 1024, 2048]
 model_sizes = [(4096, 4096), (8192, 1024), (8192, 8192), (4096, 11088), (28672, 8192), (8192, 28672)]
 
