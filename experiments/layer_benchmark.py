@@ -26,10 +26,7 @@ def benchmark(args):
             def run_benchmark(module):
                 num_bench_steps = 100
                 for i in range(10):
-                    torch.save(x.cpu().detach(), 'exp_cuda_graph_in.pt')
                     out = module(x)
-                    torch.save(out.cpu().detach(), 'exp_cuda_graph_out.pt')
-                    raise
                 start_time = time.perf_counter()
                 torch.cuda.synchronize()
                 if args.profile:
@@ -54,12 +51,14 @@ def benchmark(args):
 
             print(f"{dtype}. fp_features_num: {fp_features_num}")
             print(f"{dtype}. Sizes: {baseline_mod.weight.shape}")
+            times = []
             for i in range(10):
-                run_benchmark(int4_mod)
+                times.append(run_benchmark(int4_mod))
             print(f"Int4 time: {np.mean(times):.3f} +- {1.96 * np.std(times):.3f}ms")
 
+            times = []
             for i in range(10):
-                run_benchmark(baseline_mod)
+                times.append(run_benchmark(baseline_mod))
             print(f"FP16 time: {np.mean(times):.3f} +- {1.96 * np.std(times):.3f}ms")
 
 if __name__ == '__main__':
