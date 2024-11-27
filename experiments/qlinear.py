@@ -50,34 +50,50 @@ class MixedQLinear(torch.nn.Module):
         self.bits = bits
         self.shared_input = shared_input
         self.dtype = dtype
+
         self.register_buffer('weights_scales',
-                             torch.zeros((self.out_features, 1), dtype=self.dtype, requires_grad=False))
+                             torch.zeros((self.out_features, 1), dtype=self.dtype, requires_grad=False, device='cuda'))
         # Split for quantized weights
         if self.bits == 4:
             self.register_buffer('int_weight', torch.randint(1, 7, (self.out_features, self.int_features_num // 2),
                                                              # SubByte weight
-                                                             dtype=torch.uint8, requires_grad=False))
+                                                             dtype=torch.uint8, requires_grad=False, device='cuda'))
         else:
             self.register_buffer('int_weight', torch.randint(-128, 127, (self.out_features, self.int_features_num),
-                                                             dtype=torch.int8, requires_grad=False))
+                                                             dtype=torch.int8, requires_grad=False, device='cuda'))
 
         self.register_buffer('bias', torch.zeros(
-            (self.out_features), dtype=dtype, requires_grad=False))
+            (self.out_features), dtype=dtype, requires_grad=False, device='cuda'))
 
         self.register_buffer('int_indices', torch.zeros(
-            (self.int_features_num), dtype=torch.long, requires_grad=False))
+            (self.int_features_num), dtype=torch.long, requires_grad=False, device='cuda'))
         self.register_buffer('fp_indices', torch.zeros(
-            (self.fp_features_num), dtype=torch.long, requires_grad=False))
+            (self.fp_features_num), dtype=torch.long, requires_grad=False, device='cuda'))
 
         if self.fp_features_num > 0:
             # Split for full precision weights
             self.register_buffer('fp_weight', torch.randint(-8, 7, (self.out_features, self.fp_features_num),
-                                                            dtype=dtype, requires_grad=False))
+                                                            dtype=dtype, requires_grad=False, device='cuda'))
         if not self.symmetric:
             self.register_buffer('reduced_w', torch.zeros((1, self.out_features), dtype=dtype,
-                                                          requires_grad=False))  # Reduced
+                                                          requires_grad=False, device='cuda'))  # Reduced
 
-    def forward(self, x):
+        self.x = torch.randn(2048, self.in_features, device='cuda', dtype=torch.float16)
+        self.output = torch.randn(1, 2048, self.out_features, device='cuda', dtype=torch.float16)
+        
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self.warming(self.x)
+        torch.cuda.current_stream().wait_stream(s)
+        
+        self.g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.g):
+            self.warming(self.x)
+
+
+    def warming(self, x):
         if self.int_features_num <= 0:
             return torch.nn.functional.linear(x, self.fp_weight, self.bias)
         if torch.cuda.current_device() != x.device:
@@ -89,7 +105,6 @@ class MixedQLinear(torch.nn.Module):
         if len(x.shape) == 3:
             x = x[0]
         if shared_input.qint_x is None:
-
             # Quantize the int part of the input
             if self.symmetric:
                 if self.fp_features_num > 0:
@@ -101,23 +116,11 @@ class MixedQLinear(torch.nn.Module):
                 shared_input.qscale_x = (torch.max(torch.abs(reshaped_x), dim=1)[0].unsqueeze(1) / (
                         1 << (self.bits - 1) - 1)).to(torch.float16)
                 shared_input.qint_x = quik.symmetric.quantize(int_x, shared_input.qscale_x)
-            # elif self.fp_features_num > 0:
             else:
-                # if self.fp_features_num > 0:
-                #     int_x = x[:, self.int_indices]
-                #     shared_input.fp_x = x[:, self.fp_indices]
-                # else:
-                #     int_x = x
-                # shared_input.meta = quik.asymmetric.find_meta(int_x, self.bits)
-                # shared_input.qint_x = quik.asymmetric.quantizeOld(int_x, shared_input.meta, self.bits)
-
                 shared_input.qint_x, shared_input.meta, shared_input.fp_x = quik.asymmetric.quantize(x,
                                                                                                      self.int_indices,
                                                                                                      self.fp_indices,
                                                                                                      self.bits)
-            # else:
-            #     shared_input.meta = quik.asymmetric.find_meta(x, self.bits)
-            #     shared_input.qint_x = quik.asymmetric.quantizeOld(x, shared_input.meta, self.bits)
 
         # Compute matmul for full precision part
         if self.fp_features_num > 0:
@@ -143,9 +146,21 @@ class MixedQLinear(torch.nn.Module):
         else:
             output = quik.asymmetric.dequantize(int_result, shared_input.meta, self.weights_scales,
                                                 self.reduced_w, fp_result, self.bits)
+
         shared_input.finish()
         output = output.reshape((1, *output.shape))
+        # self.output.copy_(output)
+        # self.output = output
         return output
+
+    def forward(self, x):
+        torch.cuda.synchronize()
+        self.x.copy_(x)
+        # self.output = torch.zeros(1, 2048, self.out_features, device='cuda', dtype=torch.float16)
+        self.g.replay()
+        torch.cuda.synchronize()
+        return self.output
+
 
     @staticmethod
     def from_float(module: torch.nn.Linear,
